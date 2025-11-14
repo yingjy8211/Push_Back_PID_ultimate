@@ -19,7 +19,7 @@ tl = 7.382
 tr = 7.382
 pi = 3.14159
 # #Time_wait=0
-wheelFactor = pi * 3.25 / (3/2)
+wheelFactor = pi * 3.25 / (4/3)
 
 #motor gear teeth 24. wheel gear teeth 36
 # Motor Configuration
@@ -113,6 +113,11 @@ def autonomousPID(target, initialMaxSpeedLimit, maxSpeedLimit, time_out, export_
     Simplified: no IMU acceleration, no drift PID.
 
     target: [target_distance_inches, target_heading_radians]
+
+    Speed-dependent slip compensation:
+    - At speed >= 80: 3% slip compensation (multiply distance by 1.03)
+    - At speed <= 40: 0% slip compensation (multiply distance by 1.0)
+    - Between 40-80: linear interpolation
     """
 
     global hook_flag
@@ -120,6 +125,24 @@ def autonomousPID(target, initialMaxSpeedLimit, maxSpeedLimit, time_out, export_
     brain.screen.print("autonomous code")
 
     Reset_all()
+
+    # Calculate speed-dependent slip compensation
+    # Use maxSpeedLimit to determine slip factor
+    if maxSpeedLimit >= 80:
+        slip_factor = 1.03  # 3% compensation at high speed
+    elif maxSpeedLimit <= 40:
+        slip_factor = 1.005   # 0% compensation at low speed
+    else:
+        # Linear interpolation between 40 and 80
+        # slip_factor ranges from 1.0 to 1.03
+        slip_factor = 1.0 + 0.03 * (maxSpeedLimit - 40) / (80 - 40)
+
+    # Apply slip compensation to distance target (not rotation)
+    if target[0] != 0:
+        compensated_target = [target[0] * slip_factor, target[1]]
+        print("Speed:", maxSpeedLimit, "Slip factor:", '{:.4f}'.format(slip_factor))
+    else:
+        compensated_target = target
 
     # --- PID constants ---
     Kp = Kp_l      # linear P
@@ -154,13 +177,21 @@ def autonomousPID(target, initialMaxSpeedLimit, maxSpeedLimit, time_out, export_
 
     # ---------- Heading guard settings ----------
     # When heading error is larger than this angle, scale down forward output.
-    HEADING_GUARD_DEG = 2.0
+    HEADING_GUARD_DEG = 1.0
     # -------------------------------------------
 
     while True:
         # --- 1. Compute errors ---
-        error[0] = target[0] - currentPosition[0]   # distance error (inches)
-        error[1] = target[1] - currentPosition[1]   # heading error (radians)
+        if maxSpeedLimit >= 75 and compensated_target[1] >= 40:
+            HEADING_BIAS = 0.06  # radians
+        elif maxSpeedLimit <= 40 and compensated_target[1] >= 40:
+            HEADING_BIAS = 0.015  # radians
+        elif maxSpeedLimit >= 75 and compensated_target[1] < 40:
+            HEADING_BIAS = 0.03  # radians
+        else:
+            HEADING_BIAS = 0.0  # radians
+        error[0] = compensated_target[0] - currentPosition[0]   # distance error (inches)
+        error[1] = compensated_target[1] - currentPosition[1] - HEADING_BIAS   # heading error (radians)
 
         # --- 2. Integrals & derivatives ---
         integral += error[0] * dt
@@ -171,6 +202,18 @@ def autonomousPID(target, initialMaxSpeedLimit, maxSpeedLimit, time_out, export_
 
         # --- 3. Raw PID outputs (before guards/limits) ---
         xOutput = (Kp * error[0]) + (Ki * integral) + (Kd * derivative)
+
+        # adding slowdown near target
+        # slowdown_start = 6.0  # inches
+        # abs_dist_err = abs(error[0])
+        # if abs_dist_err < slowdown_start and abs_dist_err > 1.0:
+        #     scale = abs_dist_err / slowdown_start
+        #     if scale < 0.0:
+        #         scale = 0.0
+        #     elif scale > 1.0:
+        #         scale = 1.0
+        #     xOutput *= scale
+        
 
         turnSpeed = (KpRotation * error[1] +
                      KiRotation * headingIntegral +
@@ -260,7 +303,7 @@ def autonomousPID(target, initialMaxSpeedLimit, maxSpeedLimit, time_out, export_
             print('{:.5f}'.format(motorFLSpeed), end="\n")
 
         # --- 10. Exit conditions ---
-        if abs(error[0]) < 0.01 and abs(error[1]) < 0.015:
+        if abs(error[0]) < 0.03 and abs(error[1]) < 0.015:
             print("COMPLETE!!!")
             motor_Stop()
             print(error)
@@ -725,7 +768,7 @@ when_started1()
 
 # Global derivative gains used by autonomousPID (optional)
 Kd_linear_global = 0.0
-Kd_rotation_global = 0.0
+Kd_rotation_global = 2.0
 
 def test_move_60in(Kp_l, Kp_r, initialMaxSpeed=50, maxSpeed=90, label=""):
     """Run a single 60-inch move with given Kp values.
